@@ -6,7 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/injoyai/base/types"
+	"github.com/injoyai/base/safe"
+	"github.com/injoyai/conv"
 	"github.com/injoyai/logs"
 )
 
@@ -86,43 +87,44 @@ var (
 	}
 )
 
-// FastHosts 通过tcp(ping不可用)连接速度的方式筛选排序可用的地址
-func FastHosts(hosts ...string) []DialResult {
-	wg := sync.WaitGroup{}
-	wg.Add(len(hosts))
+// SortHosts 通过tcp(ping不可用)连接速度的方式筛选排序可用的地址
+func SortHosts(timeout ...time.Duration) []string {
+
+	//超时时间
+	_timeout := conv.Default(time.Second, timeout...)
+
+	//至少需要一个
+	chMustOne := safe.NewCloser()
+
 	mu := sync.Mutex{}
-	ls := types.List[DialResult](nil)
-	for _, host := range hosts {
+	ls := []string(nil)
+	for _, host := range Hosts {
 		go func(host string) {
-			defer wg.Done()
 			addr := host
 			if !strings.Contains(addr, ":") {
 				addr += ":7709"
 			}
+
 			now := time.Now()
 			c, err := net.Dial("tcp", addr)
 			if err != nil {
 				logs.Err(err)
 				return
 			}
-			spend := time.Since(now)
 			c.Close()
+
+			logs.Debugf("Host: %-15s  Speed: %s\n", host, time.Since(now))
 			mu.Lock()
-			ls = append(ls, DialResult{
-				Host:  host,
-				Spend: spend,
-			})
+			ls = append(ls, host)
 			mu.Unlock()
+			chMustOne.Close()
 		}(host)
 	}
-	wg.Wait()
-	return ls.Sort(func(a, b DialResult) bool {
-		return a.Spend < b.Spend
-	})
-}
 
-// DialResult 连接结果
-type DialResult struct {
-	Host  string
-	Spend time.Duration
+	<-time.After(_timeout)
+	<-chMustOne.Done()
+
+	Hosts = ls
+
+	return ls
 }
