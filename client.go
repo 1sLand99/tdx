@@ -175,6 +175,58 @@ func (this *Client) handlerDealMessage(c *client.Client, msg ios.Acker) {
 	case protocol.TypeGbbq:
 		resp, err = protocol.MGbbq.Decode(f.Data)
 
+	case protocol.TypeBlockMeta:
+		resp, err = protocol.MBlock.DecodeMeta(f.Data)
+
+	case protocol.TypeBlockInfo:
+		resp, err = protocol.MBlock.DecodeInfo(f.Data)
+
+	case protocol.TypeFinance:
+		resp, err = protocol.MFinance.Decode(f.Data)
+
+	case protocol.TypeCompanyCat:
+		resp, err = protocol.MCompanyCat.Decode(f.Data)
+
+	case protocol.TypeCompanyContent:
+		resp, err = protocol.MCompanyContent.Decode(f.Data)
+
+	// ---- 扩展行情(TdxExHq) ----
+	case protocol.TypeExSetup:
+		// 握手响应忽略
+
+	case protocol.TypeExMarkets:
+		resp, err = protocol.MEx.DecodeMarkets(f.Data)
+
+	case protocol.TypeExCount:
+		resp, err = protocol.MEx.DecodeCount(f.Data)
+
+	case protocol.TypeExInstrument:
+		resp, err = protocol.MEx.DecodeInstrument(f.Data)
+
+	case protocol.TypeExQuote:
+		resp, err = protocol.MEx.DecodeQuote(f.Data)
+
+	case protocol.TypeExQuoteList:
+		resp, err = protocol.MEx.DecodeQuoteList(f.Data, val.(protocol.ExQuoteListCache))
+
+	case protocol.TypeExBars:
+		resp, err = protocol.MEx.DecodeBars(f.Data, val.(protocol.ExBarsCache))
+
+	case protocol.TypeExMinute:
+		resp, err = protocol.MEx.DecodeMinute(f.Data)
+
+	case protocol.TypeExHistMinute:
+		resp, err = protocol.MEx.DecodeHistMinute(f.Data)
+
+	case protocol.TypeExTrade:
+		resp, err = protocol.MEx.DecodeTrade(f.Data, val.(protocol.ExTradeCache))
+
+	case protocol.TypeExHistTrade:
+		resp, err = protocol.MEx.DecodeHistTrade(f.Data, val.(protocol.ExTradeCache))
+
+	case protocol.TypeExBarsRange:
+		resp, err = protocol.MEx.DecodeBarsRange(f.Data)
+
 	default:
 		err = fmt.Errorf("通讯类型未解析:0x%X", f.Type)
 
@@ -422,19 +474,69 @@ func (this *Client) GetGbbqAll() (map[string][]*protocol.Gbbq, error) {
 	return gbbqs, nil
 }
 
-// GetMinute 获取分时数据,todo 解析好像不对,先用历史数据
-func (this *Client) GetMinute(code string) (*protocol.MinuteResp, error) {
-	return this.GetHistoryMinute(time.Now().Format("20060102"), code)
-
-	f, err := protocol.MMinute.Frame(code)
+// GetCompanyCategory 获取 F10 公司信息分类目录。
+func (this *Client) GetCompanyCategory(exchange protocol.Exchange, code string) ([]protocol.CompanyCategory, error) {
+	r, err := this.SendFrame(protocol.MCompanyCat.Frame(exchange.Uint8(), code))
 	if err != nil {
 		return nil, err
 	}
+	return r.([]protocol.CompanyCategory), nil
+}
+
+// GetCompanyContent 获取 F10 某分类的文本内容。
+func (this *Client) GetCompanyContent(exchange protocol.Exchange, code, filename string, start, length uint32) (string, error) {
+	r, err := this.SendFrame(protocol.MCompanyContent.Frame(exchange.Uint8(), code, filename, start, length))
+	if err != nil {
+		return "", err
+	}
+	return r.(string), nil
+}
+
+// GetFinanceInfo 获取标的财务/基本面信息（流通股本/总股本/行业/地域/股东户数/财务）。
+func (this *Client) GetFinanceInfo(exchange protocol.Exchange, code string) (*protocol.FinanceInfo, error) {
+	f := protocol.MFinance.Frame(exchange.Uint8(), code)
 	result, err := this.SendFrame(f)
 	if err != nil {
 		return nil, err
 	}
-	return result.(*protocol.MinuteResp), nil
+	return result.(*protocol.FinanceInfo), nil
+}
+
+// GetBlockData 下载并解析通达信板块文件（如 protocol.BlockFileGN 概念）→ 板块列表。
+func (this *Client) GetBlockData(file string) ([]*protocol.Block, error) {
+	mr, err := this.SendFrame(protocol.MBlock.FrameMeta(file))
+	if err != nil {
+		return nil, err
+	}
+	meta, ok := mr.(*protocol.BlockMetaResp)
+	if !ok || meta.Size == 0 {
+		return nil, fmt.Errorf("板块文件 %s 无数据", file)
+	}
+	var buf []byte
+	start := uint32(0)
+	for start < meta.Size {
+		n := uint32(0x7530)
+		if meta.Size-start < n {
+			n = meta.Size - start
+		}
+		r, err := this.SendFrame(protocol.MBlock.FrameInfo(start, n, file))
+		if err != nil {
+			return nil, err
+		}
+		info, ok := r.(*protocol.BlockInfoResp)
+		if !ok || len(info.Data) == 0 {
+			break
+		}
+		buf = append(buf, info.Data...)
+		start += uint32(len(info.Data))
+	}
+	return protocol.ParseBlockFile(buf), nil
+}
+
+// GetMinute 获取分时数据,todo 解析好像不对,先用历史数据
+func (this *Client) GetMinute(code string) (*protocol.MinuteResp, error) {
+	// 实时分时解析存疑，移植后暂统一走历史分时（去除原 unreachable 实现以过 vet）。
+	return this.GetHistoryMinute(time.Now().Format("20060102"), code)
 }
 
 // GetHistoryMinute 获取历史分时数据
