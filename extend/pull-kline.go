@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	_ "github.com/glebarez/go-sqlite"
 	"github.com/injoyai/bar"
 	"github.com/injoyai/conv"
-	"github.com/injoyai/logs"
 	"github.com/injoyai/tdx"
 	"github.com/injoyai/tdx/lib/xorms"
 	"github.com/injoyai/tdx/protocol"
@@ -17,64 +18,27 @@ import (
 )
 
 const (
-	Minute   = "minute"
-	Minute5  = "5minute"
-	Minute15 = "15minute"
-	Minute30 = "30minute"
-	Minute60 = "60minute"
-	Day      = "day"
-	Week     = "week"
-	Month    = "month"
-	Quarter  = "quarter"
-	Year     = "year"
+	Day    = "day"
+	Minute = "minute"
 
-	TableMinute   = "MinuteKline"
-	Table5Minute  = "Minute5Kline"
-	Table15Minute = "Minute15Kline"
-	Table30Minute = "Minute30Kline"
-	Table60Minute = "Minute60Kline"
-	TableDay      = "DayKline"
-	TableWeek     = "WeekKline"
-	TableMonth    = "MonthKline"
-	TableQuarter  = "QuarterKline"
-	TableYear     = "YearKline"
-)
-
-var (
-	AllTable      = []string{Minute, Minute5, Minute15, Minute30, Minute60, Day, Week, Month, Quarter, Year}
-	AllKlineType  = AllTable //向下兼容
-	KlineTableMap = map[string]*KlineTable{
-		Minute:   NewKlineTable(TableMinute, func(c *tdx.Client) KlineHandler { return c.GetKlineMinuteUntil }),
-		Minute5:  NewKlineTable(Table5Minute, func(c *tdx.Client) KlineHandler { return c.GetKline5MinuteUntil }),
-		Minute15: NewKlineTable(Table15Minute, func(c *tdx.Client) KlineHandler { return c.GetKline15MinuteUntil }),
-		Minute30: NewKlineTable(Table30Minute, func(c *tdx.Client) KlineHandler { return c.GetKline30MinuteUntil }),
-		Minute60: NewKlineTable(Table60Minute, func(c *tdx.Client) KlineHandler { return c.GetKline60MinuteUntil }),
-		Day:      NewKlineTable(TableDay, func(c *tdx.Client) KlineHandler { return c.GetKlineDayUntil }),
-		Week:     NewKlineTable(TableWeek, func(c *tdx.Client) KlineHandler { return c.GetKlineWeekUntil }),
-		Month:    NewKlineTable(TableMonth, func(c *tdx.Client) KlineHandler { return c.GetKlineMonthUntil }),
-		Quarter:  NewKlineTable(TableQuarter, func(c *tdx.Client) KlineHandler { return c.GetKlineQuarterUntil }),
-		Year:     NewKlineTable(TableYear, func(c *tdx.Client) KlineHandler { return c.GetKlineYearUntil }),
-	}
+	DirMinute = "min-kline"
+	DirDay    = "day-kline"
 )
 
 type PullKlineConfig struct {
 	Codes      []string  //操作代码
-	Tables     []string  //数据类型
+	Types      []string  //更新类型
 	Dir        string    //数据位置
 	Goroutines int       //协程数量
 	StartAt    time.Time //数据开始时间
 }
 
 func NewPullKline(cfg PullKlineConfig) (*PullKline, error) {
-	_tables := []*KlineTable(nil)
-	for _, v := range cfg.Tables {
-		_tables = append(_tables, KlineTableMap[v])
-	}
 	if cfg.Goroutines <= 0 {
 		cfg.Goroutines = 1
 	}
 	if len(cfg.Dir) == 0 {
-		cfg.Dir = filepath.Join(tdx.DefaultDatabaseDir, "kline")
+		cfg.Dir = filepath.Join(tdx.DefaultDatabaseDir)
 	}
 
 	db, err := xorms.NewSqlite(filepath.Join(cfg.Dir, "update.db"))
@@ -88,27 +52,58 @@ func NewPullKline(cfg PullKlineConfig) (*PullKline, error) {
 	}
 
 	return &PullKline{
-		tables:  _tables,
 		Config:  cfg,
 		Updated: updated,
+		Types:   cfg.Types,
 	}, nil
 }
 
 type PullKline struct {
-	tables  []*KlineTable
 	Config  PullKlineConfig
 	Updated *tdx.Updated
+	Types   []string
+}
+
+func (this *PullKline) Run(m *tdx.Manage) error {
+	this.Update(m)
+	for range time.Tick(time.Hour) {
+		if m.Workday.TodayIs() {
+			this.Update(m)
+		}
+	}
+	return nil
 }
 
 func (this *PullKline) Update(m *tdx.Manage) error {
+	codes := this.Config.Codes
+	if len(codes) == 0 {
+		codes = m.Codes.GetStockCodes()
+	}
 	if updated, err := this.Updated.Updated("pull"); err != nil || !updated {
-		if m.Workday.TodayIs() {
-			err = this.update(m)
+		if err := this.update(m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (this *PullKline) update(m *tdx.Manage) error {
+	codes := this.Config.Codes
+	if len(codes) == 0 {
+		codes = m.Codes.GetStockCodes()
+	}
+	for _, v := range this.Types {
+		switch v {
+		case Day:
+			err := this.updateDayKline(m, codes)
 			if err != nil {
 				return err
 			}
-			err = this.Updated.Update("pull")
-			logs.PanicErr(err)
+		case Minute:
+			err := this.updateMinKline(m, codes)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -142,16 +137,37 @@ func (this *PullKline) DayKline(code string, n ...int) (*Kline, error) {
 }
 
 func (this *PullKline) DayKlines(code string) (Klines, error) {
-	return this.Klines(TableDay, code)
+	filename := filepath.Join(this.Config.Dir, DirDay, code+".db")
+	return this.readAll(filename, new(Kline))
 }
 
 func (this *PullKline) MinKlines(code string) (Klines, error) {
-	return this.Klines(TableMinute, code)
+	dir := filepath.Join(this.Config.Dir, DirMinute, code)
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	kss := Klines{}
+	for _, v := range es {
+		if v.IsDir() || !strings.HasSuffix(v.Name(), ".db") {
+			continue
+		}
+		filename := filepath.Join(dir, v.Name())
+		ks, err := this.readAll(filename, new(protocol.Kline))
+		if err != nil {
+			return nil, err
+		}
+		kss = append(kss, ks...)
+	}
+	sort.Slice(kss, func(i, j int) bool {
+		return kss[i].Unix < kss[j].Unix
+	})
+	return kss, nil
 }
 
-func (this *PullKline) Klines(table string, code string) (Klines, error) {
+func (this *PullKline) readAll(filename string, table any) (Klines, error) {
 	//连接数据库
-	db, err := xorms.NewSqlite(filepath.Join(this.Config.Dir, code+".db"))
+	db, err := xorms.NewSqlite(filename)
 	if err != nil {
 		return nil, err
 	}
@@ -162,15 +178,9 @@ func (this *PullKline) Klines(table string, code string) (Klines, error) {
 	return data, err
 }
 
-func (this *PullKline) update(m *tdx.Manage) error {
+func (this *PullKline) updateDayKline(m *tdx.Manage, codes []string) error {
 
-	_ = os.MkdirAll(this.Config.Dir, 0777)
-
-	//1. 获取所有股票代码
-	codes := this.Config.Codes
-	if len(codes) == 0 {
-		codes = m.Codes.GetStockCodes()
-	}
+	_ = os.MkdirAll(this.Config.Dir, os.ModePerm)
 
 	b := bar.NewCoroutine(len(codes), this.Config.Goroutines, bar.WithPrefix("[xx000000]"))
 	defer b.Close()
@@ -192,72 +202,61 @@ func (this *PullKline) update(m *tdx.Manage) error {
 			}()
 
 			//连接数据库
-			db, err := xorms.NewSqlite(filepath.Join(this.Config.Dir, code+".db"))
+			db, err := xorms.NewSqlite(filepath.Join(this.Config.Dir, DirDay, code+".db"))
 			if err != nil {
 				return err
 			}
 			defer db.Close()
 
-			for _, table := range this.tables {
-				if table == nil {
-					continue
-				}
+			if err = db.Sync2(new(Kline)); err != nil {
+				return err
+			}
 
-				if err = db.Sync2(table); err != nil {
-					return err
-				}
+			//2. 获取最后一条数据
+			last := new(Kline)
+			if _, err = db.Desc("Unix").Get(last); err != nil {
+				return err
+			}
 
-				//2. 获取最后一条数据
-				last := new(Kline)
-				if _, err = db.Table(table).Desc("Unix").Get(last); err != nil {
-					return err
-				}
-
-				//3. 从服务器获取数据
-				var resp *protocol.KlineResp
-				err = m.Do(func(c *tdx.Client) error {
-					resp, err = table.handler(c)(code, func(k *protocol.Kline) bool {
-						return k.Time.Before(last.Time) || k.Time.Before(this.Config.StartAt)
-					})
-					return err
+			//3. 从服务器获取数据
+			var resp *protocol.KlineResp
+			err = m.Do(func(c *tdx.Client) error {
+				resp, err = c.GetKlineDayUntil(code, func(k *protocol.Kline) bool {
+					return k.Time.Before(last.Time) || k.Time.Before(this.Config.StartAt)
 				})
-				if err != nil {
-					return err
-				}
+				return err
+			})
+			if err != nil {
+				return err
+			}
 
-				//4. 插入数据库
-				err = db.SessionFunc(func(session *xorm.Session) error {
-					if _, er := session.Table(table).Where("Unix >= ?", last.Time.Unix()).Delete(); er != nil {
+			//4. 插入数据库
+			err = db.SessionFunc(func(session *xorm.Session) error {
+				if _, er := session.Where("Unix >= ?", last.Time.Unix()).Delete(new(Kline)); er != nil {
+					return er
+				}
+				for _, v := range resp.List {
+					if v.Time.Before(last.Time) {
+						continue
+					}
+					k := &Kline{
+						Unix:       v.Time.Unix(),
+						Kline:      v,
+						Turnover:   0,
+						FloatStock: 0,
+						TotalStock: 0,
+					}
+					if eq := m.Gbbq.GetEquity(code, v.Time); eq != nil {
+						k.Turnover = eq.Turnover(v.Volume * 100)
+						k.FloatStock = eq.Float
+						k.TotalStock = eq.Total
+					}
+					if _, er := session.Insert(k); er != nil {
 						return er
 					}
-					for _, v := range resp.List {
-						if v.Time.Before(last.Time) {
-							continue
-						}
-						k := &Kline{
-							Unix:       v.Time.Unix(),
-							Kline:      v,
-							Turnover:   0,
-							FloatStock: 0,
-							TotalStock: 0,
-						}
-						if eq := m.Gbbq.GetEquity(code, v.Time); eq != nil {
-							k.Turnover = eq.Turnover(v.Volume * 100)
-							k.FloatStock = eq.Float
-							k.TotalStock = eq.Total
-						}
-						if _, er := session.Table(table).Insert(k); er != nil {
-							logs.Err(er)
-							return er
-						}
-					}
-					return nil
-				})
-				if err != nil {
-					return err
 				}
-
-			}
+				return nil
+			})
 
 			return
 
@@ -269,27 +268,105 @@ func (this *PullKline) update(m *tdx.Manage) error {
 	return nil
 }
 
-/*
+func (this *PullKline) updateMinKline(m *tdx.Manage, codes []string) error {
 
+	_ = os.MkdirAll(this.Config.Dir, os.ModePerm)
 
+	b := bar.NewCoroutine(len(codes), this.Config.Goroutines, bar.WithPrefix("[xx000000]"))
+	defer b.Close()
 
- */
+	year := time.Now().Year()
 
-type KlineHandler func(code string, f func(k *protocol.Kline) bool) (*protocol.KlineResp, error)
+	for i := range codes {
 
-func NewKlineTable(tableName string, handler func(c *tdx.Client) KlineHandler) *KlineTable {
-	return &KlineTable{
-		tableName: tableName,
-		handler:   handler,
+		code := codes[i]
+
+		b.GoRetry(func() (err error) {
+
+			b.SetPrefix(fmt.Sprintf("[%s]", code))
+			b.Flush()
+
+			defer func() {
+				if err != nil {
+					b.Logf("[错误] [%s] %s\n", code, err)
+					b.Flush()
+				}
+			}()
+
+			ks := protocol.Klines{}
+			//判断数据库文件是否存在,如果今年的数据库文件不存在,则按年向前填充
+			filename := filepath.Join(this.Config.Dir, DirMinute, code, code+"-"+conv.String(year)+".db")
+			if !exists(filename) {
+				//尝试更新去年的数据
+				ks, err = this.updateMinuteKlineYear(m, code, year-1, ks)
+				if err != nil {
+					return err
+				}
+			}
+			//更新今年的数据
+			_, err = this.updateMinuteKlineYear(m, code, year, ks)
+
+			return
+
+		}, tdx.DefaultRetry)
+
 	}
+
+	b.Wait()
+	return nil
 }
 
-type KlineTable struct {
-	*Kline    `xorm:"extends"`                 //同步字段
-	tableName string                           //同步表名
-	handler   func(c *tdx.Client) KlineHandler //
-}
+func (this *PullKline) updateMinuteKlineYear(m *tdx.Manage, code string, year int, ks protocol.Klines) (protocol.Klines, error) {
+	//去年的数据库文件
+	filename := filepath.Join(this.Config.Dir, DirMinute, code, code+"-"+conv.String(year)+".db")
 
-func (this *KlineTable) TableName() string {
-	return this.tableName
+	db, err := xorms.NewSqlite(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	if err = db.Sync2(new(protocol.Kline)); err != nil {
+		return nil, err
+	}
+
+	//获取最新一条数据
+	last := new(protocol.Kline)
+	_, err = db.Desc("Time").Get(last)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(ks) == 0 {
+		err = m.Do(func(c *tdx.Client) error {
+			resp, err := c.GetKlineMinuteUntil(code, func(k *protocol.Kline) bool {
+				return k.Time.Before(last.Time)
+			})
+			if err != nil {
+				return err
+			}
+			ks = resp.List
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	err = db.SessionFunc(func(session *xorm.Session) error {
+		if _, err := session.Where("Time=?", last.Time.UTC().Format(time.DateTime)).Delete(new(protocol.Kline)); err != nil {
+			return err
+		}
+		for _, v := range ks {
+			if v.Time.Before(last.Time) || v.Time.After(time.Date(year+1, 1, 1, 0, 0, 0, 0, time.Local)) {
+				continue
+			}
+			if _, err = session.Insert(v); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	return ks, err
 }

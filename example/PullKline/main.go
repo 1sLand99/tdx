@@ -17,8 +17,8 @@ func main() {
 
 	p, err := extend.NewPullKline(extend.PullKlineConfig{
 		Codes:      []string{code},
-		Tables:     extend.AllTable,
-		Dir:        filepath.Join(tdx.DefaultDatabaseDir, "kline"),
+		Types:      []string{extend.Day, extend.Minute},
+		Dir:        filepath.Join(tdx.DefaultDatabaseDir),
 		Goroutines: 1,
 		StartAt:    time.Time{},
 	})
@@ -31,7 +31,8 @@ func main() {
 	logs.PanicErr(err)
 
 	for _, v := range ks {
-		logs.Debug(v)
+		_ = v
+		//logs.Debug(v)
 	}
 
 }
