@@ -27,12 +27,12 @@ func main() {
 	err = p.Update(m)
 	logs.PanicErr(err)
 
-	ks, err := p.DayKlines(code)
+	ks, err := p.DayKlines(code, time.Time{}, time.Now())
 	logs.PanicErr(err)
 
 	for _, v := range ks {
 		_ = v
-		//logs.Debug(v)
+		logs.Debug(v)
 	}
 
 }

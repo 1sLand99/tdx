@@ -16,7 +16,7 @@ func main() {
 		Types: []string{extend.Day},
 	})
 
-	ks, err := pull.DayKlines(code)
+	ks, err := pull.DayKlines(code, time.Time{}, time.Now())
 	logs.PanicErr(err)
 
 	ks2 := make(protocol.Klines, len(ks))

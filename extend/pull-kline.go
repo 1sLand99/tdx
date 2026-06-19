@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
+	"strconv"
+	"sync"
 	"time"
 
 	_ "github.com/glebarez/go-sqlite"
 	"github.com/injoyai/bar"
 	"github.com/injoyai/conv"
+	"github.com/injoyai/logs"
 	"github.com/injoyai/tdx"
 	"github.com/injoyai/tdx/lib/xorms"
 	"github.com/injoyai/tdx/protocol"
@@ -110,7 +111,7 @@ func (this *PullKline) Name() string {
 
 // DayKline 获取任意一天的数据,默认最新一天,即n=-1,同python支持负数
 func (this *PullKline) DayKline(code string, n ...int) (*Kline, error) {
-	ks, err := this.DayKlines(code)
+	ks, err := this.DayKlines(code, time.Time{}, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -131,37 +132,9 @@ func (this *PullKline) DayKline(code string, n ...int) (*Kline, error) {
 	return ks[len(ks)+_n], nil
 }
 
-func (this *PullKline) DayKlines(code string) (Klines, error) {
+func (this *PullKline) DayKlinesAll(code string) (Klines, error) {
 	filename := filepath.Join(this.Config.Dir, DirDay, code+".db")
-	return this.readAll(filename, new(Kline))
-}
 
-func (this *PullKline) MinKlines(code string) (Klines, error) {
-	dir := filepath.Join(this.Config.Dir, DirMinute, code)
-	es, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	kss := Klines{}
-	for _, v := range es {
-		if v.IsDir() || !strings.HasSuffix(v.Name(), ".db") {
-			continue
-		}
-		filename := filepath.Join(dir, v.Name())
-		ks, err := this.readAll(filename, new(protocol.Kline))
-		if err != nil {
-			return nil, err
-		}
-		kss = append(kss, ks...)
-	}
-	sort.Slice(kss, func(i, j int) bool {
-		return kss[i].Unix < kss[j].Unix
-	})
-	return kss, nil
-}
-
-func (this *PullKline) readAll(filename string, table any) (Klines, error) {
-	//连接数据库
 	db, err := xorms.NewSqlite(filename)
 	if err != nil {
 		return nil, err
@@ -169,8 +142,67 @@ func (this *PullKline) readAll(filename string, table any) (Klines, error) {
 	defer db.Close()
 
 	data := Klines{}
-	err = db.Table(table).Asc("Unix").Find(&data)
+	err = db.Asc("Unix").Find(&data)
 	return data, err
+}
+
+func (this *PullKline) DayKlines(code string, start, end time.Time) (Klines, error) {
+	filename := filepath.Join(this.Config.Dir, DirDay, code+".db")
+
+	db, err := xorms.NewSqlite(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	data := Klines{}
+	err = db.Where("Unix >= ? and Unix <= ?", start.Unix(), end.Unix()).Asc("Unix").Find(&data)
+	return data, err
+}
+
+func (this *PullKline) MinKlines(code string, start, end time.Time) (protocol.Klines, error) {
+	years := []int(nil)
+	for i := start.Year(); i <= end.Year(); i++ {
+		years = append(years, i)
+	}
+	ks := protocol.Klines{}
+	mu := sync.Mutex{}
+	wg := sync.WaitGroup{}
+	for _, year := range years {
+		wg.Add(1)
+		go func(code string, year int) {
+			defer wg.Done()
+			filename := filepath.Join(this.Config.Dir, DirMinute, code, code+"-"+strconv.Itoa(year)+".db")
+			if !exists(filename) {
+				return
+			}
+			db, err := xorms.NewSqlite(filename)
+			if err != nil {
+				logs.Err(err)
+				return
+			}
+			defer db.Close()
+			ls := protocol.Klines{}
+			err = db.Find(&ls)
+			if err != nil {
+				logs.Err(err)
+				return
+			}
+			res := protocol.Klines{}
+			for _, l := range ls {
+				if l.Time.Year() != year {
+					continue
+				}
+				res = append(res, l)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			ks = append(ks, res...)
+		}(code, year)
+	}
+	wg.Wait()
+	ks.Sort()
+	return ks, nil
 }
 
 func (this *PullKline) updateDayKline(m *tdx.Manage, codes []string) error {
