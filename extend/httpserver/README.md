@@ -15,14 +15,23 @@ import (
 )
 
 func main() {
-	s, err := httpserver.New(&httpserver.Config{
-		Addr:      ":8080",
-		PoolSize:  1,
-		ExHqHosts: tdx.ExHosts, // 可选,启用扩展行情 /ex/* 路由
-	})
+	// 方式一: 默认配置(开启断线重连)
+	s, err := httpserver.Default()
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	// 方式二: 自定义配置
+	s, err = httpserver.New(
+		httpserver.WithAddr(":8080"),
+		httpserver.WithPoolSize(2),
+		httpserver.WithExHqHosts(tdx.ExHosts...), // 可选,启用扩展行情 /ex/* 路由
+		httpserver.WithOptions(tdx.WithRedial()),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	log.Println("服务启动,监听 :8080")
 	if err := s.Run(); err != nil {
 		log.Fatal(err)
@@ -30,16 +39,20 @@ func main() {
 }
 ```
 
-## 配置说明
+## 配置选项
 
-| 字段 | 类型 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `Addr` | `string` | `":8080"` | HTTP 监听地址 |
-| `Hosts` | `[]string` | `tdx.Hosts` | 标准行情服务器列表 |
-| `PoolSize` | `int` | `1` | 标准连接池大小 |
-| `ExHqHosts` | `[]string` | `nil` | 扩展行情服务器列表,为空则不启用扩展行情 |
-| `ExPoolSize` | `int` | `1` | 扩展连接池大小 |
-| `Options` | `[]client.Option` | `nil` | 连接选项,如 `tdx.WithDebug()`、`tdx.WithRedial()` |
+使用函数式选项(Functional Options)配置服务:
+
+| 选项函数 | 说明 | 默认值 |
+| --- | --- | --- |
+| `WithAddr(addr)` | HTTP 监听地址 | `":8080"` |
+| `WithHosts(hosts...)` | 标准行情服务器列表 | `tdx.Hosts` |
+| `WithPoolSize(n)` | 标准连接池大小 | `1` |
+| `WithExHqHosts(hosts...)` | 扩展行情服务器列表,为空则不启用扩展行情 | 无 |
+| `WithExPoolSize(n)` | 扩展连接池大小 | `1` |
+| `WithOptions(opts...)` | 通达信连接选项,如 `tdx.WithDebug()`、`tdx.WithRedial()` | 无 |
+
+> `Default()` 会自动添加 `tdx.WithRedial()` 断线重连选项。
 
 ## 响应格式
 

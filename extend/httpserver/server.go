@@ -7,14 +7,48 @@ import (
 	"github.com/injoyai/tdx"
 )
 
-// Config HTTP 服务配置
-type Config struct {
-	Addr       string          // 监听地址,默认 ":8080"
-	Hosts      []string        // 标准行情服务器,默认 tdx.Hosts
-	PoolSize   int             // 标准连接池大小,默认 1
-	ExHqHosts  []string        // 扩展行情服务器,空=不启用
-	ExPoolSize int             // 扩展连接池大小,默认 1
-	Options    []client.Option // 连接选项
+// Option HTTP 服务配置选项
+type Option func(*serverConfig)
+
+type serverConfig struct {
+	addr       string
+	hosts      []string
+	poolSize   int
+	exHqHosts  []string
+	exPoolSize int
+	options    []client.Option
+}
+
+// WithAddr 设置监听地址
+func WithAddr(addr string) Option {
+	return func(c *serverConfig) { c.addr = addr }
+}
+
+// WithHosts 设置标准行情服务器列表
+func WithHosts(hosts ...string) Option {
+	return func(c *serverConfig) { c.hosts = hosts }
+}
+
+// WithPoolSize 设置标准连接池大小
+func WithPoolSize(n int) Option {
+	return func(c *serverConfig) { c.poolSize = n }
+}
+
+// WithExHqHosts 设置扩展行情服务器列表,启用扩展行情 /ex/* 路由
+func WithExHqHosts(hosts ...string) Option {
+	return func(c *serverConfig) { c.exHqHosts = hosts }
+}
+
+// WithExPoolSize 设置扩展连接池大小
+func WithExPoolSize(n int) Option {
+	return func(c *serverConfig) { c.exPoolSize = n }
+}
+
+// WithOptions 设置通达信连接选项,如 tdx.WithDebug()、tdx.WithRedial()
+func WithOptions(opts ...client.Option) Option {
+	return func(c *serverConfig) {
+		c.options = append(c.options, opts...)
+	}
 }
 
 // Server HTTP 服务
@@ -25,33 +59,32 @@ type Server struct {
 }
 
 // New 创建并初始化 HTTP 服务
-func New(cfg *Config) (*Server, error) {
-	if cfg.Addr == "" {
-		cfg.Addr = ":8080"
+func New(opts ...Option) (*Server, error) {
+	cfg := &serverConfig{
+		addr:     ":8080",
+		hosts:    tdx.Hosts,
+		poolSize: 1,
 	}
-	if len(cfg.Hosts) == 0 {
-		cfg.Hosts = tdx.Hosts
-	}
-	if cfg.PoolSize <= 0 {
-		cfg.PoolSize = 1
+	for _, opt := range opts {
+		opt(cfg)
 	}
 
 	pool, err := tdx.NewPool(func() (*tdx.Client, error) {
-		return tdx.DialHostsRange(cfg.Hosts, cfg.Options...)
-	}, cfg.PoolSize)
+		return tdx.DialHostsRange(cfg.hosts, cfg.options...)
+	}, cfg.poolSize)
 	if err != nil {
 		return nil, err
 	}
 
 	s := &Server{pool: pool}
 
-	if len(cfg.ExHqHosts) > 0 {
-		if cfg.ExPoolSize <= 0 {
-			cfg.ExPoolSize = 1
+	if len(cfg.exHqHosts) > 0 {
+		if cfg.exPoolSize <= 0 {
+			cfg.exPoolSize = 1
 		}
 		exPool, err := tdx.NewPool(func() (*tdx.Client, error) {
-			return tdx.DialExHqHosts(cfg.ExHqHosts, cfg.Options...)
-		}, cfg.ExPoolSize)
+			return tdx.DialExHqHosts(cfg.exHqHosts, cfg.options...)
+		}, cfg.exPoolSize)
 		if err != nil {
 			return nil, err
 		}
@@ -62,10 +95,16 @@ func New(cfg *Config) (*Server, error) {
 	s.registerRoutes(mux)
 
 	s.server = &http.Server{
-		Addr:    cfg.Addr,
+		Addr:    cfg.addr,
 		Handler: mux,
 	}
 	return s, nil
+}
+
+// Default 使用默认配置创建 HTTP 服务(开启断线重连)
+func Default(opts ...Option) (*Server, error) {
+	opts = append([]Option{WithOptions(tdx.WithRedial())}, opts...)
+	return New(opts...)
 }
 
 // Run 启动 HTTP 服务
