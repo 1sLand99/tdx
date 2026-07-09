@@ -79,7 +79,7 @@ func (callAuction) Decode(bs []byte) (*CallAuctionResp, error) {
 
 		a := &CallAuction{
 			Price:     Price(Float32(bs[2:6]) * 1000),
-			Match:     int64(Uint32(bs[6:8])),
+			Match:     int64(Uint32(bs[6:10])),
 			Unmatched: int64(int16(Uint16(bs[10:12]))),
 			Flag:      1,
 		}
